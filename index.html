@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Book Club Picker</title>
+<style>
+:root{--bg:#faf7f2;--fg:#2b2622;--card:#fff;--ac:#8a4b2a;--mut:#8a8178;--bd:#e4ddd2}
+@media(prefers-color-scheme:dark){:root{--bg:#1d1a17;--fg:#ece6dd;--card:#2a2622;--ac:#d9946a;--mut:#9b9288;--bd:#3d3731}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 Georgia,serif}
+main{max-width:860px;margin:0 auto;padding:16px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:12px;margin:10px 0}
+input,select,button,textarea{font:inherit;padding:7px 9px;border:1px solid var(--bd);border-radius:6px;background:var(--card);color:var(--fg)}
+button{background:var(--ac);color:#fff;border:0;cursor:pointer}button.s{background:var(--bd);color:var(--fg)}
+.g{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px;margin-top:6px}
+.g input[data-f=description]{grid-column:1/-1}
+.steps{display:flex;gap:6px;margin:10px 0}.steps div{flex:1;text-align:center;padding:6px;border-radius:6px;background:var(--bd);font-size:14px}
+.steps .on{background:var(--ac);color:#fff}
+.hd{background:var(--ac);color:#fff;padding:10px 14px;border-radius:10px;margin:10px 0}
+.mut{color:var(--mut);font-size:14px}.row{display:flex;gap:8px;align-items:center;justify-content:space-between}
+.win{border:2px solid var(--ac)}table{width:100%;border-collapse:collapse;font-size:14px}td{padding:3px}
+td input{width:100%}h1,h2{font-weight:normal}
+</style></head><body><main id="app"></main>
+<script>
+const F=['name','author','year','pages','genre','description'],PH=['suggest','veto','rank','result'];
+const TITLES={suggest:'Suggest',veto:'Veto',rank:'Rank',result:'Result'};
+const $=s=>document.querySelector(s),esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let S,A,showAdmin=false,order=[];
+async function api(p,b){const r=await fetch('/api/'+p,{method:b?'POST':'GET',headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined});const j=await r.json();if(j.error)alert(j.error);return j}
+async function load(){S=await api('state');if(showAdmin&&S.user?.admin)A=await api('admin');render()}
+const bookCard=(b,extra='')=>`<div class=card><div class=row><div><b>${esc(b.name)}</b> — ${esc(b.author)}<div class=mut>${esc(b.year)} · ${esc(b.pages)} pages · ${esc(b.genre)}${b.by?' · by '+esc(b.by):''}</div></div><div>${extra}</div></div><div>${esc(b.description)}</div>${(b.read_by||[]).length?`<div class=mut>📖 Already read by ${esc(b.read_by.join(', '))}</div>`:''}</div>`;
+function render(){
+ const el=$('#app');
+ if(!S.user){el.innerHTML=`<h1>📚 Book Club Picker</h1><div class=card><p class=mut>New username? It's created on first login with the password you enter.</p><input id=u placeholder=username> <input id=p type=password placeholder=password> <button onclick="login()">Log in</button></div>`;return}
+ let h=`<div class=row><h1>📚 Book Club</h1><div>${esc(S.user.name)} ${S.user.admin?`<button class=s onclick="showAdmin=!showAdmin;load()">${showAdmin?'Back':'Admin'}</button>`:''} <button class=s onclick="api('logout',{}).then(load)">Log out</button></div></div>`;
+ if(showAdmin&&S.user.admin&&A){el.innerHTML=h+adminView();return}
+ h+=`<div class=steps>${PH.map(p=>`<div class="${p==S.phase?'on':''}">${TITLES[p]}</div>`).join('')}</div>`;
+ if(S.end)h+=`<div class=mut>Time left in this step: <b id=t></b></div>`;
+ if(S.header)h+=`<div class=hd>${esc(S.header)}</div>`;
+ if(!S.can&&S.phase!='result')h+=`<div class=card>You're not a participant in this round.</div>`;
+ else{h+=({suggest:vSuggest,veto:vVeto,rank:vRank,result:vResult})[S.phase]();
+  if(S.done&&S.phase!='result')h+=`<p class=mut>✓ Submitted. You can still change it until the step ends.</p>`}
+ el.innerHTML=h;tickTimer()}
+let tm;function tickTimer(){clearInterval(tm);const f=()=>{const e=$('#t');if(!e)return;const s=Math.max(0,Math.round(S.end-Date.now()/1000));e.textContent=`${Math.floor(s/3600)}h ${Math.floor(s/60)%60}m ${s%60}s`;if(s==0){clearInterval(tm);setTimeout(load,1500)}};f();tm=setInterval(f,1000)}
+async function login(){await api('login',{username:$('#u').value,password:$('#p').value});load()}
+function vSuggest(){let h=`<p>Suggest up to <b>${S.max_s}</b> book(s). Leave everything empty to suggest nothing.</p>`;
+ for(let i=0;i<S.max_s;i++){const b=S.mine[i]||{};h+=`<div class="card sg"><b>Suggestion ${i+1}</b><div class=g>${F.map(f=>`<input data-f=${f} placeholder="${f}" value="${esc(b[f])}" ${f=='year'||f=='pages'?'type=number':''}>`).join('')}</div></div>`}
+ return h+`<button onclick="sendSuggest()">Submit suggestions</button>`}
+async function sendSuggest(){const books=[...document.querySelectorAll('.sg')].map(c=>Object.fromEntries([...c.querySelectorAll('input')].map(i=>[i.dataset.f,i.value]))).filter(b=>Object.values(b).some(v=>v.trim()));await api('suggest',{books});load()}
+function vVeto(){return `<p>Veto up to <b>${S.max_v}</b> book(s), and/or mark any book you have <b>already read</b> (unlimited). Either one removes the book from the ranking for everyone. If no books are left, the vote fails.</p>`+S.books.map(b=>bookCard(b,`<div><label>Veto <input type=checkbox class=vt value=${b.id} ${S.vetoes.includes(b.id)?'checked':''}></label></div><div><label>Already read <input type=checkbox class=rd value=${b.id} ${S.reads.includes(b.id)?'checked':''} onchange="if(this.checked)this.closest('.card').querySelector('.vt').checked=false"></label></div>`)).join('')+`<button onclick="sendVeto()">Submit</button>`}
+async function sendVeto(){const ids=[...document.querySelectorAll('.vt:checked')].map(c=>+c.value),reads=[...document.querySelectorAll('.rd:checked')].map(c=>+c.value);if(ids.length>S.max_v)return alert('Max '+S.max_v+' vetoes');await api('veto',{ids,reads});load()}
+const live=b=>!b.vetoed&&!(b.read_by||[]).length;
+let scores={};
+function vRank(){scores={};S.books.forEach(b=>{if(live(b)&&S.scores[b.id])scores[b.id]=S.scores[b.id]});
+ return `<p>Give every book a rank from <b>1</b> (best) to <b>10</b> (worst). Ranks can be shared: several books may get the same rank. Greyed-out books were vetoed or already read and need no rank.</p>`+S.books.map(b=>live(b)?bookCard(b,`<select onchange="scores[${b.id}]=+this.value"><option value="">–</option>${[1,2,3,4,5,6,7,8,9,10].map(n=>`<option ${scores[b.id]==n?'selected':''}>${n}</option>`).join('')}</select>`):`<div style="opacity:.45;filter:grayscale(1)">${bookCard(b,b.vetoed?'🚫 Vetoed':'📖 Already read')}</div>`).join('')+`<button onclick="sendRank()">Submit ranking</button>`}
+async function sendRank(){if(S.books.filter(live).some(b=>!scores[b.id]))return alert('Give every book a rank from 1 to 10');await api('rank',{scores});load()}
+function vResult(){if(S.failed)return `<div class=card><b>The vote failed.</b><p>No books were left to rank: every suggestion was vetoed or marked as already read (or nothing was suggested). The admin can reset the round to start over.</p></div>`;if(!S.result.length)return '<p>No books made it to the end.</p>';return (S.user.admin?`<p><a href="/api/results.csv" download><button type=button>⬇ Download ranks per user (CSV)</button></a></p>`:'')+`<p class=mut>Method: ${S.method.toUpperCase()} · ${S.ballots} ballot(s)</p>`+S.result.map(b=>`<div class="${b.rank==1?'win':''}">${bookCard(b,`<b>#${b.rank}</b><div class=mut>${esc(b.note)}</div>`)}</div>`).join('')}
+function adminView(){const s=A.settings;const i=(k,t='text',w='')=>`<input id=s_${k} type=${t} value="${esc(s[k])}" style="${w}">`;
+ return `<h2>Settings</h2><div class=card><div class=g>
+ <label>Suggestions/user ${i('max_s','number')}</label><label>Vetoes/user ${i('max_v','number')}</label>
+ <label>Counting method <select id=s_method>${['irv','schulze','borda'].map(m=>`<option ${s.method==m?'selected':''} value=${m}>${m.toUpperCase()}</option>`).join('')}</select></label></div>
+ <div class=g>${['suggest','veto','rank'].map(p=>`<label>Timer ${p} (hours, empty = none) ${i('dur_'+p,'number').replace('<input','<input step=any min=0')}</label>`).join('')}</div>
+ ${PH.map(p=>`<label>Header on "${p}" page ${i('head_'+p,'text','width:100%')}</label>`).join('')}
+ <p><button onclick="saveSettings()">Save settings</button></p></div>
+ <h2>Flow (currently: ${s.phase})</h2><div class=card><button onclick="phase('advance')">Advance to next step</button> <button class=s onclick="confirm('Delete all suggestions, vetoes and rankings and restart?')&&phase('reset')">Reset round</button>${s.phase=='result'&&s.failed!='1'?` <a href="/api/results.csv" download><button type=button>⬇ Download ranks per user (CSV)</button></a>`:''}</div>
+ <h2>Users</h2><div class=card><table>${A.users.map(u=>`<tr><td>${esc(u.name)}${u.admin?' (admin)':''}</td><td><label><input type=checkbox ${u.p?'checked':''} onchange="api('admin/user',{id:${u.id},p:this.checked?1:0})"> participates</label></td><td class=mut>done: ${u.done.join(', ')||'-'}</td><td><input placeholder="new password" onchange="api('admin/user',{id:${u.id},password:this.value}).then(()=>alert('Saved'))"></td></tr>`).join('')}</table></div>
+ <h2>Suggestions</h2>${A.books.map(b=>`<div class=card data-id=${b.id}><div class=mut>by ${esc(b.by)} · ${A.vetoes[b.id]||0} veto(es) · ${A.reads[b.id]||0} already read</div><div class=g>${F.map(f=>`<input data-f=${f} value="${esc(b[f])}">`).join('')}</div><p><button onclick="saveBook(${b.id},this)">Save</button> <button class=s onclick="delBook(${b.id})">Delete</button></p></div>`).join('')||'<p class=mut>None yet.</p>'}`}
+async function saveSettings(){const o={};for(const e of document.querySelectorAll('[id^=s_]'))o[e.id.slice(2)]=e.value;await api('admin/settings',o);load()}
+async function phase(a){await api('admin/phase',{action:a});load()}
+async function saveBook(id,btn){const o={id};btn.closest('.card').querySelectorAll('input').forEach(i=>o[i.dataset.f]=i.value);await api('admin/book',o);load()}
+async function delBook(id){if(confirm('Delete this suggestion?')){await api('admin/book',{id,delete:1});load()}}
+load();setInterval(async()=>{if(!S?.user||showAdmin)return;const n=await api('state');if(n.phase!=S.phase){S=n;render()}},15000);
+</script></body></html>

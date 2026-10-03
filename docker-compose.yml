@@ -1,0 +1,11 @@
+services:
+  bookclub:
+    build: .
+    ports:
+      - "5000:5000"      # change the left number to expose another host port
+    environment:
+      SECRET: ${SECRET:-change-me}   # set in a .env file or your shell
+      DB_PATH: /data/books.db
+    volumes:
+      - ./data:/data     # the SQLite database lives here
+    restart: unless-stopped
