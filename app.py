@@ -257,7 +257,7 @@ def login():
     if not u:
         if len(pw) < 8: return err('Password must be at least 8 characters')
         if q('select count(*) c from users', one=True)['c'] >= MAX_USERS: return err('Registration is closed')
-        try: q('insert into users(username,password,is_admin,participates) values(?,?,0,0)', (un, generate_password_hash(pw)))  # new accounts start as non-participants
+        try: q('insert into users(username,password,is_admin,participates) values(?,?,0,1)', (un, generate_password_hash(pw)))  # new accounts start as non-participants
         except sqlite3.IntegrityError: return err('Username taken')
         u = q('select * from users where username=? collate nocase', (un,), one=True)
     elif not check_password_hash(u['password'] or '', pw): return err('Wrong password')
