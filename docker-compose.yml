@@ -2,10 +2,22 @@ services:
   bookclub:
     build: .
     ports:
-      - "5000:5000"      # change the left number to expose another host port
+      # Localhost only: the Cloudflare tunnel is the single way in from outside.
+      # (If cloudflared runs as a container in this same compose file, drop `ports` and point the tunnel at http://bookclub:5000)
+      - "127.0.0.1:5000:5000"
     environment:
-      SECRET: ${SECRET:-change-me}   # set in a .env file or your shell
+      SECRET: ${SECRET:?set SECRET in .env}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
+      COOKIE_SECURE: ${COOKIE_SECURE:-1}   # set to 0 only if you also use the app over plain http
       DB_PATH: /data/books.db
     volumes:
-      - ./data:/data     # the SQLite database lives here
+      - ./data:/data     # the SQLite database lives here (must be writable by uid 1000)
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped

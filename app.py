@@ -1,15 +1,68 @@
-import sqlite3, time, os, csv, io
+import sqlite3, time, os, csv, io, re, sys, math
+from datetime import timedelta
 from functools import wraps
 from flask import Flask, request, session, jsonify, send_file, g, Response
+from werkzeug.exceptions import HTTPException
+from werkzeug.security import generate_password_hash, check_password_hash
+from flask_limiter import Limiter
+
+# ---- required configuration: refuse to start with missing/weak secrets ----
+SECRET = os.environ.get('SECRET', '')
+ADMIN_PW = os.environ.get('ADMIN_PASSWORD', '')
+if len(SECRET) < 32 or SECRET.startswith(('replace-with', 'change-me')):
+    sys.exit('SECRET must be a random string of at least 32 characters (e.g. `openssl rand -hex 32`)')
+if len(ADMIN_PW) < 10 or ADMIN_PW.startswith('replace-with'):
+    sys.exit('ADMIN_PASSWORD must be set to at least 10 characters')
+COOKIE_SECURE = os.environ.get('COOKIE_SECURE', '1') != '0'  # set COOKIE_SECURE=0 only for plain-http access
+MAX_USERS = int(os.environ.get('MAX_USERS', '100'))
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET', 'change-me')
+app.config.update(SECRET_KEY=SECRET, MAX_CONTENT_LENGTH=64 * 1024,
+                  SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Lax', SESSION_COOKIE_SECURE=COOKIE_SECURE,
+                  PERMANENT_SESSION_LIFETIME=timedelta(days=14))
 DB = os.environ.get('DB_PATH', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'books.db'))
 PH = ['suggest', 'veto', 'rank', 'result']
 F = ['name', 'author', 'year', 'pages', 'genre', 'description']
+LIM = dict(name=200, author=200, genre=100, description=2000)
+USER_RE = re.compile(r'[\w .\-]{2,32}')
 DEF = dict(phase='suggest', max_s='3', max_v='1', method='borda',
            dur_suggest='', dur_veto='', dur_rank='',
            head_suggest='', head_veto='', head_rank='', head_result='', failed='0')
+
+
+def client_ip():
+    # Only trustworthy because the container is reachable solely through the Cloudflare tunnel
+    return request.headers.get('CF-Connecting-IP') or request.remote_addr
+
+
+limiter = Limiter(client_ip, app=app, default_limits=['60 per minute', '600 per hour'], storage_uri='memory://')
+
+
+def err(msg, code=200): return jsonify(error=msg), code
+
+
+@app.errorhandler(HTTPException)
+def http_err(e):
+    msg = {413: 'Request too large', 429: 'Too many requests, slow down and try again in a bit'}.get(e.code, e.description)
+    return jsonify(error=msg), e.code
+
+
+@app.errorhandler(Exception)
+def any_err(e):
+    app.logger.exception(e)
+    return jsonify(error='Something went wrong'), 500
+
+
+@app.after_request
+def sec_headers(r):
+    r.headers['Content-Security-Policy'] = ("default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; "
+                                            "connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+    r.headers['X-Frame-Options'] = 'DENY'
+    r.headers['X-Content-Type-Options'] = 'nosniff'
+    r.headers['Referrer-Policy'] = 'no-referrer'
+    if COOKIE_SECURE: r.headers['Strict-Transport-Security'] = 'max-age=31536000'
+    if request.path.startswith('/api/'): r.headers['Cache-Control'] = 'no-store'
+    return r
 
 
 def db():
@@ -35,7 +88,7 @@ def init():
     os.makedirs(os.path.dirname(DB), exist_ok=True)
     c = sqlite3.connect(DB)
     c.executescript('''
-    create table if not exists users(id integer primary key, username text unique, password text, is_admin int default 0, participates int default 1);
+    create table if not exists users(id integer primary key, username text unique, password text, is_admin int default 0, participates int default 0, sv int default 0);
     create table if not exists settings(k text primary key, v text);
     create table if not exists books(id integer primary key, user_id int, name, author, year, pages, genre, description);
     create table if not exists vetoes(user_id int, book_id int);
@@ -43,9 +96,16 @@ def init():
     create table if not exists ranks(user_id int, book_id int, pos int);
     create table if not exists reads(user_id int, book_id int);
     create view if not exists removed as select book_id from vetoes union select book_id from reads;''')
+    if 'sv' not in [r[1] for r in c.execute('pragma table_info(users)')]:  # session version, bumped on password change
+        c.execute('alter table users add column sv int default 0')
     for k, v in DEF.items(): c.execute('insert or ignore into settings values(?,?)', (k, v))
     c.execute("insert or ignore into settings values('start',?)", (str(time.time()),))
-    c.execute("insert or ignore into users(username,password,is_admin,participates) values('admin','admin',1,0)")
+    # the admin password always comes from the environment; changing it there also logs out old admin sessions
+    row = c.execute("select password from users where username='admin'").fetchone()
+    if not row:
+        c.execute("insert into users(username,password,is_admin,participates,sv) values('admin',?,1,0,0)", (generate_password_hash(ADMIN_PW),))
+    elif not check_password_hash(row[0] or '', ADMIN_PW):
+        c.execute("update users set password=?, is_admin=1, sv=sv+1 where username='admin'", (generate_password_hash(ADMIN_PW),))
     c.commit(); c.close()
 
 
@@ -75,16 +135,54 @@ def tick():
 
 
 def me():
-    return q('select * from users where id=?', (session.get('uid'),), one=True) if 'uid' in session else None
+    uid = session.get('uid')
+    if uid is None: return None
+    u = q('select * from users where id=?', (uid,), one=True)
+    if u and u['sv'] == session.get('sv'): return u
+    session.clear(); return None
 
 
 def admin(f):
     @wraps(f)
     def w(*a, **k):
         u = me()
-        if not u or not u['is_admin']: return jsonify(error='Admin only'), 403
+        if not u or not u['is_admin']: return err('Admin only', 403)
         return f(*a, **k)
     return w
+
+
+def body():
+    j = request.get_json(silent=True)  # requires a JSON content type, which also blocks cross-site form posts
+    return j if isinstance(j, dict) else {}
+
+
+def clean_book(b):
+    """Validate one book; returns (list of values in F order, None) or (None, error message)."""
+    if not isinstance(b, dict): return None, 'Invalid suggestion'
+    v = []
+    for f in F:
+        x = b.get(f)
+        x = '' if x is None or isinstance(x, (dict, list)) else str(x).strip()
+        if not x: return None, 'Fill in every field of a suggestion (or leave it fully empty)'
+        if f in LIM and len(x) > LIM[f]: return None, f'{f.capitalize()} is too long (max {LIM[f]} characters)'
+        if f == 'year' and not re.fullmatch(r'-?\d{1,4}', x): return None, 'Year must be a number (up to 4 digits)'
+        if f == 'pages' and not re.fullmatch(r'\d{1,5}', x): return None, 'Pages must be a number (up to 5 digits)'
+        v.append(str(int(x)) if f in ('year', 'pages') else x)
+    return v, None
+
+
+def clean_setting(k, v):
+    """Returns the cleaned value as a string, or None if invalid."""
+    v = '' if v is None or isinstance(v, (dict, list)) else str(v).strip()
+    if k in ('max_s', 'max_v'): return str(int(v)) if re.fullmatch(r'\d{1,2}', v) else None
+    if k == 'method': return v if v in ('irv', 'schulze', 'borda') else None
+    if k.startswith('dur_'):
+        if v == '': return ''
+        try: f = float(v)
+        except ValueError: return None
+        return str(f) if 0 <= f <= 24 * 365 and math.isfinite(f) else None
+    if k.startswith('head_'): return v if len(v) <= 300 else None
+    return None
 
 
 def book_dict(r, names=False):
@@ -150,15 +248,22 @@ def index(): return send_file(os.path.join(os.path.dirname(os.path.abspath(__fil
 
 
 @app.post('/api/login')
+@limiter.limit('10 per minute;50 per hour')
 def login():
-    j = request.json; un = (j.get('username') or '').strip(); pw = j.get('password') or ''
-    if not un: return jsonify(error='Enter a username')
-    u = q('select * from users where username=?', (un,), one=True)
+    j = body(); un = str(j.get('username') or '').strip(); pw = j.get('password')
+    if not USER_RE.fullmatch(un): return err('Username must be 2-32 characters: letters, digits, spaces, . _ -')
+    if not isinstance(pw, str) or not pw or len(pw) > 128: return err('Password must be 8-128 characters')
+    u = q('select * from users where username=? collate nocase', (un,), one=True)
     if not u:
-        q('insert into users(username,password) values(?,?)', (un, pw))
-        u = q('select * from users where username=?', (un,), one=True)
-    elif u['password'] != pw: return jsonify(error='Wrong password')
-    session['uid'] = u['id']; return jsonify(ok=1)
+        if len(pw) < 8: return err('Password must be at least 8 characters')
+        if q('select count(*) c from users', one=True)['c'] >= MAX_USERS: return err('Registration is closed')
+        try: q('insert into users(username,password,is_admin,participates) values(?,?,0,0)', (un, generate_password_hash(pw)))  # new accounts start as non-participants
+        except sqlite3.IntegrityError: return err('Username taken')
+        u = q('select * from users where username=? collate nocase', (un,), one=True)
+    elif not check_password_hash(u['password'] or '', pw): return err('Wrong password')
+    session.clear(); session.permanent = True
+    session['uid'] = u['id']; session['sv'] = u['sv']
+    return jsonify(ok=1)
 
 
 @app.post('/api/logout')
@@ -201,12 +306,13 @@ def guard(ph):
 @app.post('/api/suggest')
 def suggest():
     u = guard('suggest')
-    if not u: return jsonify(error='Not allowed right now')
-    bs = request.json.get('books', [])[:int(S()['max_s'])]; rows = []
-    for b in bs:
-        v = [str(b.get(f, '')).strip() for f in F]
-        if not all(v): return jsonify(error='Fill in every field of a suggestion (or leave it fully empty)')
-        if not (v[2].lstrip('-').isdigit() and v[3].isdigit()): return jsonify(error='Year and pages must be numbers')
+    if not u: return err('Not allowed right now')
+    bs = body().get('books', [])
+    if not isinstance(bs, list): return err('Invalid request')
+    rows = []
+    for b in bs[:int(S()['max_s'])]:
+        v, e = clean_book(b)
+        if e: return err(e)
         rows.append(v)
     q('delete from books where user_id=?', (u['id'],))
     for v in rows: q('insert into books(user_id,name,author,year,pages,genre,description) values(?,?,?,?,?,?,?)', (u['id'], *v))
@@ -216,24 +322,27 @@ def suggest():
 @app.post('/api/veto')
 def veto():
     u = guard('veto')
-    if not u: return jsonify(error='Not allowed right now')
-    ids = request.json.get('ids', []); rd = request.json.get('reads', [])
-    if len(ids) > int(S()['max_v']): return jsonify(error='Too many vetoes')
+    if not u: return err('Not allowed right now')
+    j = body(); ids = j.get('ids', []); rd = j.get('reads', [])
+    if not (isinstance(ids, list) and isinstance(rd, list) and all(type(i) is int for i in ids + rd)): return err('Invalid request')
+    valid = {r['id'] for r in q('select id from books')}
+    ids = set(ids) & valid; rd = set(rd) & valid
+    if len(ids) > int(S()['max_v']): return err('Too many vetoes')
     q('delete from vetoes where user_id=?', (u['id'],)); q('delete from reads where user_id=?', (u['id'],))
-    for i in ids: q('insert into vetoes values(?,?)', (u['id'], int(i)))
-    for i in rd: q('insert into reads values(?,?)', (u['id'], int(i)))
+    for i in ids: q('insert into vetoes values(?,?)', (u['id'], i))
+    for i in rd: q('insert into reads values(?,?)', (u['id'], i))
     mark(u['id'], 'veto'); tick(); return jsonify(ok=1)
 
 
 @app.post('/api/rank')
 def rank():
     u = guard('rank')
-    if not u: return jsonify(error='Not allowed right now')
-    sc = request.json.get('scores', {})
+    if not u: return err('Not allowed right now')
+    sc = body().get('scores', {})
     ids = [r['id'] for r in q('select id from books where id not in (select book_id from removed)')]
     try: sc = {i: int(sc[str(i)]) for i in ids}
-    except (KeyError, ValueError, TypeError): return jsonify(error='Give every book a rank from 1 to 10')
-    if any(not 1 <= v <= 10 for v in sc.values()): return jsonify(error='Ranks must be between 1 and 10')
+    except (KeyError, ValueError, TypeError): return err('Give every book a rank from 1 to 10')
+    if any(not 1 <= v <= 10 for v in sc.values()): return err('Ranks must be between 1 and 10')
     q('delete from ranks where user_id=?', (u['id'],))
     for i, v in sc.items(): q('insert into ranks values(?,?,?)', (u['id'], i, v))
     mark(u['id'], 'rank'); tick(); return jsonify(ok=1)
@@ -253,55 +362,74 @@ def admin_get():
 @app.post('/api/admin/settings')
 @admin
 def admin_settings():
-    for k, v in request.json.items():
-        if k in DEF and k not in ('phase', 'failed'): setv(k, v)
+    new = {}
+    for k, v in body().items():
+        if k in DEF and k not in ('phase', 'failed'):
+            c = clean_setting(k, v)
+            if c is None: return err(f'Invalid value for {k}')
+            new[k] = c
+    for k, v in new.items(): setv(k, v)
     return jsonify(ok=1)
 
 
 @app.post('/api/admin/user')
 @admin
 def admin_user():
-    j = request.json
-    if 'p' in j: q('update users set participates=? where id=?', (int(j['p']), j['id']))
-    if j.get('password'): q('update users set password=? where id=?', (j['password'], j['id']))
+    j = body(); uid = j.get('id')
+    if type(uid) is not int or not q('select 1 from users where id=?', (uid,), one=True): return err('Unknown user')
+    pw = j.get('password')
+    if pw is not None and pw != '' and (not isinstance(pw, str) or not 8 <= len(pw) <= 128): return err('Password must be 8-128 characters')
+    if 'p' in j: q('update users set participates=? where id=?', (1 if j['p'] else 0, uid))
+    if pw: q('update users set password=?, sv=sv+1 where id=?', (generate_password_hash(pw), uid))  # also logs that user out everywhere
     return jsonify(ok=1)
 
 
 @app.post('/api/admin/book')
 @admin
 def admin_book():
-    j = request.json
+    j = body(); bid = j.get('id')
+    if type(bid) is not int: return err('Unknown book')
     if j.get('delete'):
-        q('delete from books where id=?', (j['id'],)); q('delete from vetoes where book_id=?', (j['id'],)); q('delete from ranks where book_id=?', (j['id'],)); q('delete from reads where book_id=?', (j['id'],))
-    else: q('update books set ' + ','.join(f + '=?' for f in F) + ' where id=?', [j[f] for f in F] + [j['id']])
+        q('delete from books where id=?', (bid,)); q('delete from vetoes where book_id=?', (bid,)); q('delete from ranks where book_id=?', (bid,)); q('delete from reads where book_id=?', (bid,))
+    else:
+        v, e = clean_book(j)
+        if e: return err(e)
+        q('update books set ' + ','.join(f + '=?' for f in F) + ' where id=?', v + [bid])
     return jsonify(ok=1)
 
 
 @app.post('/api/admin/phase')
 @admin
 def admin_phase():
-    a = request.json['action']
+    a = body().get('action')
     if a == 'advance': advance()
     elif a == 'reset':
         for t in ['books', 'vetoes', 'reads', 'done', 'ranks']: q(f'delete from {t}')
         setv('phase', 'suggest'); setv('failed', '0'); setv('start', time.time())
+    else: return err('Unknown action')
     return jsonify(ok=1)
+
+
+def csv_safe(v):
+    # neutralise spreadsheet formulas (=, +, -, @, tab, CR) so opening the CSV in Excel can't run user-supplied formulas
+    s = str(v)
+    return "'" + s if s.lstrip()[:1] in ('=', '+', '-', '@') or s[:1] in ('\t', '\r') else s
 
 
 @app.get('/api/results.csv')
 @admin
 def results_csv():
-    if S()['phase'] != 'result' or S()['failed'] == '1': return jsonify(error='Results are not in yet'), 400
+    if S()['phase'] != 'result' or S()['failed'] == '1': return err('Results are not in yet', 400)
     books = q('select * from books where id not in (select book_id from removed) order by id')
     out = io.StringIO(); w = csv.writer(out)
-    w.writerow(['user'] + [f"{b['name']} - {b['author']} (#{b['id']})" for b in books])
+    w.writerow(['user'] + [csv_safe(f"{b['name']} - {b['author']} (#{b['id']})") for b in books])
     for u in q('select * from users where id in (select user_id from ranks) order by username'):
         sc = {r['book_id']: r['pos'] for r in q('select book_id,pos from ranks where user_id=?', (u['id'],))}
-        w.writerow([u['username']] + [sc.get(b['id'], '') for b in books])
+        w.writerow([csv_safe(u['username'])] + [sc.get(b['id'], '') for b in books])
     return Response('\ufeff' + out.getvalue(), mimetype='text/csv; charset=utf-8',
                     headers={'Content-Disposition': 'attachment; filename=ranks.csv'})
 
 
 init()
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='127.0.0.1', port=5000)  # dev only; the container uses gunicorn

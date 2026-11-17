@@ -21,14 +21,14 @@ td input{width:100%}h1,h2{font-weight:normal}
 <script>
 const F=['name','author','year','pages','genre','description'],PH=['suggest','veto','rank','result'];
 const TITLES={suggest:'Suggest',veto:'Veto',rank:'Rank',result:'Result'};
-const $=s=>document.querySelector(s),esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const $=s=>document.querySelector(s),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let S,A,showAdmin=false,order=[];
 async function api(p,b){const r=await fetch('/api/'+p,{method:b?'POST':'GET',headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined});const j=await r.json();if(j.error)alert(j.error);return j}
 async function load(){S=await api('state');if(showAdmin&&S.user?.admin)A=await api('admin');render()}
 const bookCard=(b,extra='')=>`<div class=card><div class=row><div><b>${esc(b.name)}</b> — ${esc(b.author)}<div class=mut>${esc(b.year)} · ${esc(b.pages)} pages · ${esc(b.genre)}${b.by?' · by '+esc(b.by):''}</div></div><div>${extra}</div></div><div>${esc(b.description)}</div>${(b.read_by||[]).length?`<div class=mut>📖 Already read by ${esc(b.read_by.join(', '))}</div>`:''}</div>`;
 function render(){
  const el=$('#app');
- if(!S.user){el.innerHTML=`<h1>📚 Book Club Picker</h1><div class=card><p class=mut>New username? It's created on first login with the password you enter.</p><input id=u placeholder=username> <input id=p type=password placeholder=password> <button onclick="login()">Log in</button></div>`;return}
+ if(!S.user){el.innerHTML=`<h1>📚 Book Club Picker</h1><div class=card><p class=mut>New username? It's created on first login with the password you enter (min. 8 characters). The admin has to activate new accounts before they can take part.</p><input id=u placeholder=username> <input id=p type=password placeholder=password> <button onclick="login()">Log in</button></div>`;return}
  let h=`<div class=row><h1>📚 Book Club</h1><div>${esc(S.user.name)} ${S.user.admin?`<button class=s onclick="showAdmin=!showAdmin;load()">${showAdmin?'Back':'Admin'}</button>`:''} <button class=s onclick="api('logout',{}).then(load)">Log out</button></div></div>`;
  if(showAdmin&&S.user.admin&&A){el.innerHTML=h+adminView();return}
  h+=`<div class=steps>${PH.map(p=>`<div class="${p==S.phase?'on':''}">${TITLES[p]}</div>`).join('')}</div>`;
@@ -60,7 +60,7 @@ function adminView(){const s=A.settings;const i=(k,t='text',w='')=>`<input id=s_
  ${PH.map(p=>`<label>Header on "${p}" page ${i('head_'+p,'text','width:100%')}</label>`).join('')}
  <p><button onclick="saveSettings()">Save settings</button></p></div>
  <h2>Flow (currently: ${s.phase})</h2><div class=card><button onclick="phase('advance')">Advance to next step</button> <button class=s onclick="confirm('Delete all suggestions, vetoes and rankings and restart?')&&phase('reset')">Reset round</button>${s.phase=='result'&&s.failed!='1'?` <a href="/api/results.csv" download><button type=button>⬇ Download ranks per user (CSV)</button></a>`:''}</div>
- <h2>Users</h2><div class=card><table>${A.users.map(u=>`<tr><td>${esc(u.name)}${u.admin?' (admin)':''}</td><td><label><input type=checkbox ${u.p?'checked':''} onchange="api('admin/user',{id:${u.id},p:this.checked?1:0})"> participates</label></td><td class=mut>done: ${u.done.join(', ')||'-'}</td><td><input placeholder="new password" onchange="api('admin/user',{id:${u.id},password:this.value}).then(()=>alert('Saved'))"></td></tr>`).join('')}</table></div>
+ <h2>Users</h2><div class=card><table>${A.users.map(u=>`<tr><td>${esc(u.name)}${u.admin?' (admin)':''}</td><td><label><input type=checkbox ${u.p?'checked':''} onchange="api('admin/user',{id:${u.id},p:this.checked?1:0})"> participates</label></td><td class=mut>done: ${u.done.join(', ')||'-'}</td><td><input placeholder="new password" onchange="api('admin/user',{id:${u.id},password:this.value}).then(r=>{if(!r.error){this.value='';alert('Saved')}})"></td></tr>`).join('')}</table></div>
  <h2>Suggestions</h2>${A.books.map(b=>`<div class=card data-id=${b.id}><div class=mut>by ${esc(b.by)} · ${A.vetoes[b.id]||0} veto(es) · ${A.reads[b.id]||0} already read</div><div class=g>${F.map(f=>`<input data-f=${f} value="${esc(b[f])}">`).join('')}</div><p><button onclick="saveBook(${b.id},this)">Save</button> <button class=s onclick="delBook(${b.id})">Delete</button></p></div>`).join('')||'<p class=mut>None yet.</p>'}`}
 async function saveSettings(){const o={};for(const e of document.querySelectorAll('[id^=s_]'))o[e.id.slice(2)]=e.value;await api('admin/settings',o);load()}
 async function phase(a){await api('admin/phase',{action:a});load()}
