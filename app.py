@@ -14,7 +14,7 @@ if len(SECRET) < 32 or SECRET.startswith(('replace-with', 'change-me')):
 if len(ADMIN_PW) < 10 or ADMIN_PW.startswith('replace-with'):
     sys.exit('ADMIN_PASSWORD must be set to at least 10 characters')
 COOKIE_SECURE = os.environ.get('COOKIE_SECURE', '1') != '0'  # set COOKIE_SECURE=0 only for plain-http access
-MAX_USERS = int(os.environ.get('MAX_USERS', '100'))
+MAX_USERS = int(os.environ.get('MAX_USERS', '20'))  # includes the admin account
 
 app = Flask(__name__)
 app.config.update(SECRET_KEY=SECRET, MAX_CONTENT_LENGTH=64 * 1024,
@@ -27,7 +27,7 @@ LIM = dict(name=200, author=200, genre=100, description=2000)
 USER_RE = re.compile(r'[\w .\-]{2,32}')
 DEF = dict(phase='suggest', max_s='3', max_v='1', method='borda',
            dur_suggest='', dur_veto='', dur_rank='',
-           head_suggest='', head_veto='', head_rank='', head_result='', failed='0')
+           head_suggest='', head_veto='', head_rank='', head_result='', failed='0', bonus='0')
 
 
 def client_ip():
@@ -88,7 +88,7 @@ def init():
     os.makedirs(os.path.dirname(DB), exist_ok=True)
     c = sqlite3.connect(DB)
     c.executescript('''
-    create table if not exists users(id integer primary key, username text unique, password text, is_admin int default 0, participates int default 0, sv int default 0);
+    create table if not exists users(id integer primary key, username text unique, password text, is_admin int default 0, participates int default 1, sv int default 0);
     create table if not exists settings(k text primary key, v text);
     create table if not exists books(id integer primary key, user_id int, name, author, year, pages, genre, description);
     create table if not exists vetoes(user_id int, book_id int);
@@ -113,21 +113,29 @@ def S(): return {r['k']: r['v'] for r in q('select * from settings')}
 def setv(k, v): q('insert or replace into settings values(?,?)', (k, str(v)))
 
 
+def deadline(s, ph):
+    """When the given step ends: start + its own timer + any time carried over from the previous step (None = no timer)."""
+    d = s.get('dur_' + ph)
+    return float(s['start']) + float(d) * 3600 + float(s.get('bonus') or 0) if d else None
+
+
 def advance():
-    s = S(); i = PH.index(s['phase'])
+    s = S(); ph = s['phase']; i = PH.index(ph)
     if i < 3:
         nxt = PH[i + 1]
         left = q('select count(*) c from books where id not in (select book_id from removed)', one=True)['c']
         if nxt in ('veto', 'rank') and left == 0: nxt = 'result'; setv('failed', '1')  # nothing left: the vote fails
-        setv('phase', nxt); setv('start', time.time())
+        dl = deadline(s, ph)  # time this step had left (incl. what it inherited) is handed to the next step
+        carry = max(0.0, dl - time.time()) if dl and s.get('dur_' + nxt) else 0.0
+        setv('phase', nxt); setv('start', time.time()); setv('bonus', carry)
 
 
 def tick():
     while True:
         s = S(); ph = s['phase']
         if ph == 'result': return
-        d = s.get('dur_' + ph)
-        timeup = d and time.time() >= float(s['start']) + float(d) * 3600
+        dl = deadline(s, ph)
+        timeup = dl is not None and time.time() >= dl
         tot = q('select count(*) c from users where participates=1', one=True)['c']
         n = q('select count(*) c from done where phase=? and user_id in (select id from users where participates=1)', (ph,), one=True)['c']
         if timeup or (tot and n >= tot): advance()
@@ -257,7 +265,7 @@ def login():
     if not u:
         if len(pw) < 8: return err('Password must be at least 8 characters')
         if q('select count(*) c from users', one=True)['c'] >= MAX_USERS: return err('Registration is closed')
-        try: q('insert into users(username,password,is_admin,participates) values(?,?,0,1)', (un, generate_password_hash(pw)))  # new accounts start as non-participants
+        try: q('insert into users(username,password,is_admin,participates) values(?,?,0,1)', (un, generate_password_hash(pw)))  # new accounts participate by default
         except sqlite3.IntegrityError: return err('Username taken')
         u = q('select * from users where username=? collate nocase', (un,), one=True)
     elif not check_password_hash(u['password'] or '', pw): return err('Wrong password')
@@ -277,11 +285,14 @@ def state():
     ph = s['phase']; dur = s.get('dur_' + ph)
     out = dict(user=dict(name=u['username'], admin=bool(u['is_admin'])), phase=ph, header=s['head_' + ph],
                max_s=int(s['max_s']), max_v=int(s['max_v']), method=s['method'],
-               end=float(s['start']) + float(dur) * 3600 if dur else None, can=bool(u['participates']))
+               end=deadline(s, ph), carry=float(s['bonus']) if dur else 0, can=bool(u['participates']))
     if not u['participates'] and ph != 'result': return jsonify(out)  # non-participants (e.g. admin) can still see the result
     uid = u['id']
     out['done'] = bool(q('select 1 from done where user_id=? and phase=?', (uid, ph), one=True))
-    if ph == 'suggest': out['mine'] = [book_dict(r) for r in q('select * from books where user_id=? order by id', (uid,))]
+    if ph == 'suggest':
+        out['mine'] = [book_dict(r) for r in q('select * from books where user_id=? order by id', (uid,))]
+        # others' suggestions, without author; sorted by title so consecutive ids can't hint which ones belong together
+        out['others'] = [book_dict(r) for r in q('select * from books where user_id!=? order by name collate nocase, id', (uid,))]
     elif ph == 'veto':
         out['books'] = [book_extra(r) for r in q('select * from books order by id')]
         out['vetoes'] = [r['book_id'] for r in q('select book_id from vetoes where user_id=?', (uid,))]
@@ -348,6 +359,18 @@ def rank():
     mark(u['id'], 'rank'); tick(); return jsonify(ok=1)
 
 
+@app.post('/api/skip')
+def skip():
+    ph = body().get('phase')  # the step the person was looking at; refused if it has already moved on
+    u = guard(ph) if isinstance(ph, str) else None
+    if not u: return err('Not allowed right now')
+    if ph == 'suggest': q('delete from books where user_id=?', (u['id'],))
+    elif ph == 'veto': q('delete from vetoes where user_id=?', (u['id'],)); q('delete from reads where user_id=?', (u['id'],))
+    elif ph == 'rank': q('delete from ranks where user_id=?', (u['id'],))  # abstain: no ballot, not counted in the vote
+    else: return err('Nothing to skip')
+    mark(u['id'], ph); tick(); return jsonify(ok=1)
+
+
 @app.get('/api/admin')
 @admin
 def admin_get():
@@ -364,7 +387,7 @@ def admin_get():
 def admin_settings():
     new = {}
     for k, v in body().items():
-        if k in DEF and k not in ('phase', 'failed'):
+        if k in DEF and k not in ('phase', 'failed', 'bonus'):
             c = clean_setting(k, v)
             if c is None: return err(f'Invalid value for {k}')
             new[k] = c
@@ -405,7 +428,7 @@ def admin_phase():
     if a == 'advance': advance()
     elif a == 'reset':
         for t in ['books', 'vetoes', 'reads', 'done', 'ranks']: q(f'delete from {t}')
-        setv('phase', 'suggest'); setv('failed', '0'); setv('start', time.time())
+        setv('phase', 'suggest'); setv('failed', '0'); setv('bonus', '0'); setv('start', time.time())
     else: return err('Unknown action')
     return jsonify(ok=1)
 

@@ -17,6 +17,26 @@ button{background:var(--ac);color:#fff;border:0;cursor:pointer}button.s{backgrou
 .mut{color:var(--mut);font-size:14px}.row{display:flex;gap:8px;align-items:center;justify-content:space-between}
 .win{border:2px solid var(--ac)}table{width:100%;border-collapse:collapse;font-size:14px}td{padding:3px}
 td input{width:100%}h1,h2{font-weight:normal}
+h1{font-size:clamp(1.4rem,6vw,2rem)}
+.card{overflow-wrap:anywhere}
+.row{flex-wrap:wrap}
+.bi{flex:1 1 220px;min-width:0}
+.ex{display:flex;gap:6px 14px;flex-wrap:wrap;align-items:center}
+.g{grid-template-columns:repeat(auto-fit,minmax(min(150px,100%),1fr))}
+.g label{display:flex;flex-direction:column;gap:2px;font-size:14px}
+.g label input,.g label select{width:100%}
+.blk{display:block;margin-top:8px;font-size:14px}
+button,select,input{min-height:40px;max-width:100%}
+input[type=checkbox]{min-height:0;width:20px;height:20px;vertical-align:middle}
+button{margin:2px 0}
+.acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.acts button{flex:1 1 140px;margin:0}
+.lg{display:flex;flex-direction:column;gap:8px;max-width:360px}
+.sc{overflow-x:auto}
+#toast{position:fixed;left:50%;top:16px;max-width:calc(100% - 24px);transform:translate(-50%,-16px);opacity:0;pointer-events:none;
+ background:var(--fg);color:var(--bg);padding:10px 16px;border-radius:999px;font-size:15px;box-shadow:0 4px 14px rgba(0,0,0,.25);transition:opacity .2s,transform .2s;z-index:10}
+#toast.on{opacity:1;transform:translate(-50%,0)}
+@media(max-width:600px){main{padding:10px}.steps{gap:4px}.steps div{font-size:12px;padding:5px 2px}
+ .ut tr{display:block;padding:6px 0;border-bottom:1px solid var(--bd)}.ut td{display:block;padding:2px 0}}
 </style></head><body><main id="app"></main>
 <script>
 const F=['name','author','year','pages','genre','description'],PH=['suggest','veto','rank','result'];
@@ -25,46 +45,53 @@ const $=s=>document.querySelector(s),esc=s=>String(s??'').replace(/[&<>"']/g,c=>
 let S,A,showAdmin=false,order=[];
 async function api(p,b){const r=await fetch('/api/'+p,{method:b?'POST':'GET',headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined});const j=await r.json();if(j.error)alert(j.error);return j}
 async function load(){S=await api('state');if(showAdmin&&S.user?.admin)A=await api('admin');render()}
-const bookCard=(b,extra='')=>`<div class=card><div class=row><div><b>${esc(b.name)}</b> — ${esc(b.author)}<div class=mut>${esc(b.year)} · ${esc(b.pages)} pages · ${esc(b.genre)}${b.by?' · by '+esc(b.by):''}</div></div><div>${extra}</div></div><div>${esc(b.description)}</div>${(b.read_by||[]).length?`<div class=mut>📖 Already read by ${esc(b.read_by.join(', '))}</div>`:''}</div>`;
+const bookCard=(b,extra='')=>`<div class=card><div class=row><div class=bi><b>${esc(b.name)}</b> — ${esc(b.author)}<div class=mut>${esc(b.year)} · ${esc(b.pages)} pages · ${esc(b.genre)}${b.by?' · by '+esc(b.by):''}</div></div><div class=ex>${extra}</div></div><div>${esc(b.description)}</div>${(b.read_by||[]).length?`<div class=mut>📖 Already read by ${esc(b.read_by.join(', '))}</div>`:''}</div>`;
 function render(){
  const el=$('#app');
- if(!S.user){el.innerHTML=`<h1>📚 Book Club Picker</h1><div class=card><p class=mut>New username? It's created on first login with the password you enter (min. 8 characters). The admin has to activate new accounts before they can take part.</p><input id=u placeholder=username> <input id=p type=password placeholder=password> <button onclick="login()">Log in</button></div>`;return}
- let h=`<div class=row><h1>📚 Book Club</h1><div>${esc(S.user.name)} ${S.user.admin?`<button class=s onclick="showAdmin=!showAdmin;load()">${showAdmin?'Back':'Admin'}</button>`:''} <button class=s onclick="api('logout',{}).then(load)">Log out</button></div></div>`;
+ if(!S.user){el.innerHTML=`<h1>📚 Book Club Picker</h1><div class=card><p class=mut>New username? It's created on first login with the password you enter (min. 8 characters).</p><div class=lg><input id=u placeholder=username autocomplete=username><input id=p type=password placeholder=password autocomplete=current-password onkeydown="if(event.key=='Enter')login()"><button onclick="login()">Log in</button></div></div>`;return}
+ let h=`<div class=row><h1>📚 Book Club</h1><div class=ex>${esc(S.user.name)} ${S.user.admin?`<button class=s onclick="showAdmin=!showAdmin;load()">${showAdmin?'Back':'Admin'}</button>`:''} <button class=s onclick="api('logout',{}).then(load)">Log out</button></div></div>`;
  if(showAdmin&&S.user.admin&&A){el.innerHTML=h+adminView();return}
  h+=`<div class=steps>${PH.map(p=>`<div class="${p==S.phase?'on':''}">${TITLES[p]}</div>`).join('')}</div>`;
- if(S.end)h+=`<div class=mut>Time left in this step: <b id=t></b></div>`;
+ if(S.end)h+=`<div class=mut>Time left in this step: <b id=t></b>${S.carry>0?` (includes ${fmtDur(S.carry)} carried over from the previous step)`:''}</div>`;
  if(S.header)h+=`<div class=hd>${esc(S.header)}</div>`;
  if(!S.can&&S.phase!='result')h+=`<div class=card>You're not a participant in this round.</div>`;
  else{h+=({suggest:vSuggest,veto:vVeto,rank:vRank,result:vResult})[S.phase]();
-  if(S.done&&S.phase!='result')h+=`<p class=mut>✓ Submitted. You can still change it until the step ends.</p>`}
+  if(S.done&&S.phase!='result')h+=`<p class=mut>✓ You're done with this step. You can still change your answer until the step ends.</p>`}
  el.innerHTML=h;tickTimer()}
+const fmtDur=s=>{s=Math.round(s);const h=Math.floor(s/3600),m=Math.floor(s/60)%60;return h?`${h}h ${m}m`:m?`${m}m`:`${s}s`};
+let tt;function toast(m){let e=$('#toast');if(!e){e=document.createElement('div');e.id='toast';e.setAttribute('role','status');e.setAttribute('aria-live','polite');document.body.appendChild(e)}
+ e.textContent=m;e.classList.remove('on');void e.offsetWidth;e.classList.add('on');clearTimeout(tt);tt=setTimeout(()=>e.classList.remove('on'),2600)}
+const acts=(fn,label)=>`<div class=acts><button onclick="${fn}">${label}</button>${S.done?'':`<button class=s onclick="skipStep()">Skip this step</button>`}</div>`;
+const SKIPMSG={suggest:'Skip suggesting? You will be marked as done without suggesting a book.',veto:'Skip this step? You will be marked as done without vetoing or marking any books as read.',rank:"Skip ranking? You won't be counted in the vote."};
+async function skipStep(){if(!confirm(SKIPMSG[S.phase]))return;const j=await api('skip',{phase:S.phase});if(!j.error)toast('✓ Skipped, you are done with this step');load()}
 let tm;function tickTimer(){clearInterval(tm);const f=()=>{const e=$('#t');if(!e)return;const s=Math.max(0,Math.round(S.end-Date.now()/1000));e.textContent=`${Math.floor(s/3600)}h ${Math.floor(s/60)%60}m ${s%60}s`;if(s==0){clearInterval(tm);setTimeout(load,1500)}};f();tm=setInterval(f,1000)}
 async function login(){await api('login',{username:$('#u').value,password:$('#p').value});load()}
 function vSuggest(){let h=`<p>Suggest up to <b>${S.max_s}</b> book(s). Leave everything empty to suggest nothing.</p>`;
+ if(S.others.length)h+=`<h2>Already suggested by others (${S.others.length})</h2>`+S.others.map(b=>bookCard(b)).join('')+`<h2>Your suggestions</h2>`;
  for(let i=0;i<S.max_s;i++){const b=S.mine[i]||{};h+=`<div class="card sg"><b>Suggestion ${i+1}</b><div class=g>${F.map(f=>`<input data-f=${f} placeholder="${f}" value="${esc(b[f])}" ${f=='year'||f=='pages'?'type=number':''}>`).join('')}</div></div>`}
- return h+`<button onclick="sendSuggest()">Submit suggestions</button>`}
-async function sendSuggest(){const books=[...document.querySelectorAll('.sg')].map(c=>Object.fromEntries([...c.querySelectorAll('input')].map(i=>[i.dataset.f,i.value]))).filter(b=>Object.values(b).some(v=>v.trim()));await api('suggest',{books});load()}
-function vVeto(){return `<p>Veto up to <b>${S.max_v}</b> book(s), and/or mark any book you have <b>already read</b> (unlimited). Either one removes the book from the ranking for everyone. If no books are left, the vote fails.</p>`+S.books.map(b=>bookCard(b,`<div><label>Veto <input type=checkbox class=vt value=${b.id} ${S.vetoes.includes(b.id)?'checked':''}></label></div><div><label>Already read <input type=checkbox class=rd value=${b.id} ${S.reads.includes(b.id)?'checked':''} onchange="if(this.checked)this.closest('.card').querySelector('.vt').checked=false"></label></div>`)).join('')+`<button onclick="sendVeto()">Submit</button>`}
-async function sendVeto(){const ids=[...document.querySelectorAll('.vt:checked')].map(c=>+c.value),reads=[...document.querySelectorAll('.rd:checked')].map(c=>+c.value);if(ids.length>S.max_v)return alert('Max '+S.max_v+' vetoes');await api('veto',{ids,reads});load()}
+ return h+acts('sendSuggest()','Submit suggestions')}
+async function sendSuggest(){const books=[...document.querySelectorAll('.sg')].map(c=>Object.fromEntries([...c.querySelectorAll('input')].map(i=>[i.dataset.f,i.value]))).filter(b=>Object.values(b).some(v=>v.trim()));const j=await api('suggest',{books});if(!j.error)toast(books.length?'✓ Suggestions received':'✓ Received, you suggested nothing');load()}
+function vVeto(){return `<p>Veto up to <b>${S.max_v}</b> book(s), and/or mark any book you have <b>already read</b> (unlimited). Either one removes the book from the ranking for everyone. If no books are left, the vote fails.</p>`+S.books.map(b=>bookCard(b,`<div><label>Veto <input type=checkbox class=vt value=${b.id} ${S.vetoes.includes(b.id)?'checked':''}></label></div><div><label>Already read <input type=checkbox class=rd value=${b.id} ${S.reads.includes(b.id)?'checked':''} onchange="if(this.checked)this.closest('.card').querySelector('.vt').checked=false"></label></div>`)).join('')+acts('sendVeto()','Submit')}
+async function sendVeto(){const ids=[...document.querySelectorAll('.vt:checked')].map(c=>+c.value),reads=[...document.querySelectorAll('.rd:checked')].map(c=>+c.value);if(ids.length>S.max_v)return alert('Max '+S.max_v+' vetoes');const j=await api('veto',{ids,reads});if(!j.error)toast('✓ Your choices were received');load()}
 const live=b=>!b.vetoed&&!(b.read_by||[]).length;
 let scores={};
 function vRank(){scores={};S.books.forEach(b=>{if(live(b)&&S.scores[b.id])scores[b.id]=S.scores[b.id]});
- return `<p>Give every book a rank from <b>1</b> (best) to <b>10</b> (worst). Ranks can be shared: several books may get the same rank. Greyed-out books were vetoed or already read and need no rank.</p>`+S.books.map(b=>live(b)?bookCard(b,`<select onchange="scores[${b.id}]=+this.value"><option value="">–</option>${[1,2,3,4,5,6,7,8,9,10].map(n=>`<option ${scores[b.id]==n?'selected':''}>${n}</option>`).join('')}</select>`):`<div style="opacity:.45;filter:grayscale(1)">${bookCard(b,b.vetoed?'🚫 Vetoed':'📖 Already read')}</div>`).join('')+`<button onclick="sendRank()">Submit ranking</button>`}
-async function sendRank(){if(S.books.filter(live).some(b=>!scores[b.id]))return alert('Give every book a rank from 1 to 10');await api('rank',{scores});load()}
+ return `<p>Give every book a rank from <b>1</b> (best) to <b>10</b> (worst). Ranks can be shared: several books may get the same rank. Greyed-out books were vetoed or already read and need no rank.</p>`+S.books.map(b=>live(b)?bookCard(b,`<select onchange="scores[${b.id}]=+this.value"><option value="">–</option>${[1,2,3,4,5,6,7,8,9,10].map(n=>`<option ${scores[b.id]==n?'selected':''}>${n}</option>`).join('')}</select>`):`<div style="opacity:.45;filter:grayscale(1)">${bookCard(b,b.vetoed?'🚫 Vetoed':'📖 Already read')}</div>`).join('')+acts('sendRank()','Submit ranking')}
+async function sendRank(){if(S.books.filter(live).some(b=>!scores[b.id]))return alert('Give every book a rank from 1 to 10');const j=await api('rank',{scores});if(!j.error)toast('✓ Your ranking was received');load()}
 function vResult(){if(S.failed)return `<div class=card><b>The vote failed.</b><p>No books were left to rank: every suggestion was vetoed or marked as already read (or nothing was suggested). The admin can reset the round to start over.</p></div>`;if(!S.result.length)return '<p>No books made it to the end.</p>';return (S.user.admin?`<p><a href="/api/results.csv" download><button type=button>⬇ Download ranks per user (CSV)</button></a></p>`:'')+`<p class=mut>Method: ${S.method.toUpperCase()} · ${S.ballots} ballot(s)</p>`+S.result.map(b=>`<div class="${b.rank==1?'win':''}">${bookCard(b,`<b>#${b.rank}</b><div class=mut>${esc(b.note)}</div>`)}</div>`).join('')}
 function adminView(){const s=A.settings;const i=(k,t='text',w='')=>`<input id=s_${k} type=${t} value="${esc(s[k])}" style="${w}">`;
  return `<h2>Settings</h2><div class=card><div class=g>
  <label>Suggestions/user ${i('max_s','number')}</label><label>Vetoes/user ${i('max_v','number')}</label>
  <label>Counting method <select id=s_method>${['irv','schulze','borda'].map(m=>`<option ${s.method==m?'selected':''} value=${m}>${m.toUpperCase()}</option>`).join('')}</select></label></div>
  <div class=g>${['suggest','veto','rank'].map(p=>`<label>Timer ${p} (hours, empty = none) ${i('dur_'+p,'number').replace('<input','<input step=any min=0')}</label>`).join('')}</div>
- ${PH.map(p=>`<label>Header on "${p}" page ${i('head_'+p,'text','width:100%')}</label>`).join('')}
+ ${PH.map(p=>`<label class=blk>Header on "${p}" page ${i('head_'+p,'text','width:100%')}</label>`).join('')}
  <p><button onclick="saveSettings()">Save settings</button></p></div>
  <h2>Flow (currently: ${s.phase})</h2><div class=card><button onclick="phase('advance')">Advance to next step</button> <button class=s onclick="confirm('Delete all suggestions, vetoes and rankings and restart?')&&phase('reset')">Reset round</button>${s.phase=='result'&&s.failed!='1'?` <a href="/api/results.csv" download><button type=button>⬇ Download ranks per user (CSV)</button></a>`:''}</div>
- <h2>Users</h2><div class=card><table>${A.users.map(u=>`<tr><td>${esc(u.name)}${u.admin?' (admin)':''}</td><td><label><input type=checkbox ${u.p?'checked':''} onchange="api('admin/user',{id:${u.id},p:this.checked?1:0})"> participates</label></td><td class=mut>done: ${u.done.join(', ')||'-'}</td><td><input placeholder="new password" onchange="api('admin/user',{id:${u.id},password:this.value}).then(r=>{if(!r.error){this.value='';alert('Saved')}})"></td></tr>`).join('')}</table></div>
+ <h2>Users</h2><div class="card sc"><table class=ut>${A.users.map(u=>`<tr><td>${esc(u.name)}${u.admin?' (admin)':''}</td><td><label><input type=checkbox ${u.p?'checked':''} onchange="api('admin/user',{id:${u.id},p:this.checked?1:0})"> participates</label></td><td class=mut>done: ${u.done.join(', ')||'-'}</td><td><input placeholder="new password" onchange="api('admin/user',{id:${u.id},password:this.value}).then(r=>{if(!r.error){this.value='';alert('Saved')}})"></td></tr>`).join('')}</table></div>
  <h2>Suggestions</h2>${A.books.map(b=>`<div class=card data-id=${b.id}><div class=mut>by ${esc(b.by)} · ${A.vetoes[b.id]||0} veto(es) · ${A.reads[b.id]||0} already read</div><div class=g>${F.map(f=>`<input data-f=${f} value="${esc(b[f])}">`).join('')}</div><p><button onclick="saveBook(${b.id},this)">Save</button> <button class=s onclick="delBook(${b.id})">Delete</button></p></div>`).join('')||'<p class=mut>None yet.</p>'}`}
-async function saveSettings(){const o={};for(const e of document.querySelectorAll('[id^=s_]'))o[e.id.slice(2)]=e.value;await api('admin/settings',o);load()}
+async function saveSettings(){const o={};for(const e of document.querySelectorAll('[id^=s_]'))o[e.id.slice(2)]=e.value;const j=await api('admin/settings',o);if(!j.error)toast('✓ Settings saved');load()}
 async function phase(a){await api('admin/phase',{action:a});load()}
-async function saveBook(id,btn){const o={id};btn.closest('.card').querySelectorAll('input').forEach(i=>o[i.dataset.f]=i.value);await api('admin/book',o);load()}
+async function saveBook(id,btn){const o={id};btn.closest('.card').querySelectorAll('input').forEach(i=>o[i.dataset.f]=i.value);const j=await api('admin/book',o);if(!j.error)toast('✓ Suggestion saved');load()}
 async function delBook(id){if(confirm('Delete this suggestion?')){await api('admin/book',{id,delete:1});load()}}
 load();setInterval(async()=>{if(!S?.user||showAdmin)return;const n=await api('state');if(n.phase!=S.phase){S=n;render()}},15000);
 </script></body></html>
